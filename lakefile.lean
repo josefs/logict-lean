@@ -7,3 +7,7 @@ package «logict» where
 @[default_target]
 lean_lib «LogicT» where
   srcDir := "."
+
+lean_exe «logict-test» where
+  srcDir := "."
+  root := `Test
