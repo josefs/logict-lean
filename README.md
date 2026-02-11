@@ -4,12 +4,6 @@ A backtracking, logic-programming monad transformer for Lean 4.
 
 Based on the Haskell [`logict`](https://hackage.haskell.org/package/logict) library, adapted from the paper [*Backtracking, Interleaving, and Terminating Monad Transformers*](http://okmij.org/ftp/papers/LogicT.pdf) by Oleg Kiselyov, Chung-chieh Shan, Daniel P. Friedman, and Amr Sabry.
 
-## ⚠️ Use of `unsafe`
-
-This library uses `unsafe inductive` to define the core `LogicT` type. The type is a lazy stream where the tail can be wrapped in a monadic action (`m (LogicT m a)`), which means `LogicT` appears nested inside the parameter `m`. Lean's strict positivity checker cannot verify that this is safe for an arbitrary `m` (since `m` could in principle be a non-positive functor), so the definition is rejected without `unsafe`. The Haskell library avoids this issue by using a CPS encoding, but in Lean 4 that encoding produces a `Type 1` value, making `msplit` — the key operation of the library — impossible to type at `Type 0`.
-
-All functions that pattern-match on the `LogicT` constructors are also marked `unsafe` as a consequence. The API is safe to use in practice; the unsafety is a limitation of what Lean's type system can express, not an indication of undefined behavior.
-
 ## Overview
 
 `LogicT m a` is a monad transformer for nondeterministic computations that can produce zero or more results of type `a`, with effects in `m`. When `m = Id`, the type alias `Logic a` is provided as a convenient shorthand.
@@ -22,6 +16,12 @@ All functions that pattern-match on the `LogicT` constructors are also marked `u
 - **Soft-cut** — `ifte` (if-then-else for logic programming) commits to the first branch if it succeeds
 - **Observation** — `observeAll`, `observe`, and `observeMany` extract results from computations
 - **Monad transformer** — layer logic programming over any monad via `MonadLift`
+
+## ⚠️ Use of `unsafe`
+
+This library uses `unsafe inductive` to define the core `LogicT` type. The type is a lazy stream where the tail can be wrapped in a monadic action (`m (LogicT m a)`), which means `LogicT` appears nested inside the parameter `m`. Lean's strict positivity checker cannot verify that this is safe for an arbitrary `m` (since `m` could in principle be a non-positive functor), so the definition is rejected without `unsafe`. The Haskell library avoids this issue by using a CPS encoding, but in Lean 4 that encoding produces a `Type 1` value, making `msplit` — the key operation of the library — impossible to type at `Type 0`.
+
+All functions that pattern-match on the `LogicT` constructors are also marked `unsafe` as a consequence. The API is safe to use in practice; the unsafety is a limitation of what Lean's type system can express, not an indication of undefined behavior.
 
 ## Installation
 
