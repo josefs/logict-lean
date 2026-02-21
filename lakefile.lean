@@ -8,6 +8,7 @@ package «logict» where
 lean_lib «LogicT» where
   srcDir := "."
 
+@[test_driver]
 lean_exe «logict-test» where
   srcDir := "."
   root := `Test
