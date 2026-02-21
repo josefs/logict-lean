@@ -6,29 +6,63 @@ Based on the Haskell [`logict`](https://hackage.haskell.org/package/logict) libr
 
 ## Overview
 
-`LogicT m a` is a monad transformer for nondeterministic computations that can produce zero or more results of type `a`, with effects in `m`. When `m = Id`, the type alias `Logic a` is provided as a convenient shorthand.
+`LogicT r m a` is a monad transformer for nondeterministic computations that can produce zero or more results of type `a`, with effects in `m`. The parameter `r` is the result type used in the CPS representation; observation functions fix it to a concrete type (e.g. `List a` for `observeAllT`). When `m = Id`, the type alias `Logic a` is provided as a convenient shorthand.
 
 ### Features
 
 - **Backtracking search** — express nondeterministic computations using `pure`, `Alternative.failure`, and `<|>`
+- **Lazy splitting** — `msplit` decomposes a computation into its first result and the rest, computing only on demand
 - **Fair operations** — `interleave` (fair disjunction) and `fairBind` (fair conjunction) for search strategies that don't get stuck exploring one branch forever
 - **Pruning** — `once` returns only the first result; `lnot` succeeds only when a computation fails
 - **Soft-cut** — `ifte` (if-then-else for logic programming) commits to the first branch if it succeeds
 - **Observation** — `observeAll`, `observe`, and `observeMany` extract results from computations
 - **Monad transformer** — layer logic programming over any monad via `MonadLift`
+- **MonadLogic typeclass** — generic interface for logic-programming monads, with a `LogicT` instance
 
-## ⚠️ Use of `unsafe`
+## Design
 
-This library uses `unsafe inductive` to define the core `LogicT` type. The type is a lazy stream where the tail can be wrapped in a monadic action (`m (LogicT m a)`), which means `LogicT` appears nested inside the parameter `m`. Lean's strict positivity checker cannot verify that this is safe for an arbitrary `m` (since `m` could in principle be a non-positive functor), so the definition is rejected without `unsafe`. The Haskell library avoids this issue by using a CPS encoding, but in Lean 4 that encoding produces a `Type 1` value, making `msplit` — the key operation of the library — impossible to type at `Type 0`.
+### CPS Representation
 
-All functions that pattern-match on the `LogicT` constructors are also marked `unsafe` as a consequence. The API is safe to use in practice; the unsafety is a limitation of what Lean's type system can express, not an indication of undefined behavior.
+The core type uses continuation-passing style:
+
+```
+LogicT r m a = (a → m r → m r) → m r → m r
+```
+
+This representation is safe and does not require `unsafe`. The `r` parameter is fixed by each observation or operation:
+
+- `observeAllT` fixes `r = List a` for efficient eager collection
+- `msplit` fixes `r = MStream m a` for lazy splitting
+- `once`, `lnot`, etc. accept `r = MStream m a` input and produce output polymorphic in `r`
+
+### Lazy msplit via MStream
+
+The `msplit` function is implemented lazily using `MStream`, a stream type where each tail is a deferred monadic action. When you split a computation, only the first alternative is evaluated; the rest are captured as a suspended `m (MStream m a)` and forced only when needed.
+
+### Use of `unsafe`
+
+The `MStream` type is defined as an `unsafe inductive`:
+
+```lean
+unsafe inductive MStream (m : Type → Type) (a : Type) where
+  | nil : MStream m a
+  | cons : a → m (MStream m a) → MStream m a
+```
+
+The `unsafe` is required because `m (MStream m a)` is a non-positive occurrence — `MStream` appears nested inside the parameter `m`. Lean's kernel cannot verify this is safe for an arbitrary `m` (since `m` could in principle be contravariant), so it rejects the definition without `unsafe`. In practice this is safe because `m` is always covariant (a monad).
+
+The core `LogicT` type and its `Monad`/`Alternative`/`MonadLift` instances are entirely safe — no `unsafe` involved. Only `MStream` and functions that pattern-match on it (`msplit`, `once`, `lnot`, `ifte`, `interleave`, `fairBind`) carry the `unsafe` marker. The eager observation function `observeAllT` does not use `MStream` and is also safe.
+
+### MonadLogic Typeclass
+
+The `MonadLogic f m` typeclass provides a generic interface for logic-programming monads. It is parameterized by `f` (the splittable computation type) and `m` (the base monad). The `LogicT` instance uses `LogicM m` as `f`, where `LogicM m a = LogicT (MStream m a) m a` — this lets the result type `r` co-vary with `a` as required by `msplit`.
 
 ## Installation
 
 Add to your `lakefile.lean`:
 
 ```lean
-require logict from git "https://github.com/josefs/logict" @ "main"
+require logict from git "https://github.com/josefs/logict-lean" @ "main"
 ```
 
 Then run `lake update`.
@@ -67,10 +101,14 @@ def pyTriples (n : Nat) : Logic (Nat × Nat × Nat) := do
 
 ## API Reference
 
-### Core Type
+### Core Types
 
-- `LogicT m a` — a nondeterministic computation with effects in `m`
-- `Logic a` — type alias for `LogicT Id a`
+| Type | Description |
+|---|---|
+| `LogicT r m a` | Nondeterministic computation with effects in `m` and CPS result type `r` |
+| `LogicM m a` | `LogicT (MStream m a) m a` — the split-compatible specialization |
+| `Logic a` | `LogicT (List a) Id a` — pure logic computations |
+| `MStream m a` | Lazy stream for `msplit` results (unsafe inductive) |
 
 ### Construction
 
@@ -84,40 +122,59 @@ def pyTriples (n : Nat) : Logic (Nat × Nat × Nat) := do
 | `LogicT.choose xs` | Alias for `fromList` |
 | `LogicT.guard p` | Fail unless `p` is true |
 
-### MonadLogic Operations
+### Splitting and Reconstruction
 
 | Function | Description |
 |---|---|
-| `msplit m` | Split into first result and rest: `m a → m (Option (a × m a))` |
-| `interleave a b` | Fair disjunction — alternates results from `a` and `b` |
-| `fairBind m f` | Fair conjunction — interleaves results of `f` across choices from `m` |
-| `once m` | Prune to at most one result |
-| `lnot m` | Succeed with `()` iff `m` fails |
-| `ifte cond th el` | If `cond` succeeds, commit to `th` applied to its results; otherwise use `el` |
-| `reflect o` | Construct from `Option (a × m a)` (inverse of `msplit`) |
+| `LogicT.msplit l` | Lazily split into first result + deferred rest: returns `m (MStream m a)` |
+| `LogicT.msplit' l` | Like `msplit` but returns `m (Option (a × LogicM m a))` |
+| `LogicT.reflect o` | Reconstruct from `Option (a × LogicT r m a)` (inverse of split) |
+
+### Logic Operations
+
+| Function | Description |
+|---|---|
+| `LogicT.interleave a b` | Fair disjunction — alternates results from `a` and `b` |
+| `LogicT.fairBind m f` | Fair conjunction — interleaves results of `f` across choices from `m` |
+| `LogicT.once m` | Prune to at most one result |
+| `LogicT.lnot m` | Succeed with `()` iff `m` fails |
+| `LogicT.ifte cond th el` | If `cond` succeeds, apply `th` to its results; otherwise use `el` |
 
 ### Observation (Extracting Results)
 
 | Function | Description |
 |---|---|
-| `observeAllT` | Extract all results: `LogicT m a → m (List a)` |
-| `observeT` | Extract first result: `LogicT m a → m (Option a)` |
-| `observeManyT n` | Extract up to `n` results: `Nat → LogicT m a → m (List a)` |
+| `LogicT.observeAllT` | Extract all results: `LogicT (List a) m a → m (List a)` |
+| `LogicT.observeT` | Extract first result: `LogicT (Option a) m a → m (Option a)` |
+| `LogicT.observeManyT n` | Extract up to `n` results |
 | `Logic.observeAll` | `Logic a → List a` |
 | `Logic.observe` | `Logic a → Option a` |
 | `Logic.observeMany n` | `Nat → Logic a → List a` |
 
+### MonadLogic Typeclass
+
+| Method | Description |
+|---|---|
+| `MonadLogic.msplit` | Split a computation: `f a → m (Option (a × f a))` |
+| `MonadLogic.reflect` | Reconstruct from split result |
+| `MonadLogic.once` | Prune to first result |
+| `MonadLogic.lnot` | Logical negation |
+| `MonadLogic.interleave` | Fair disjunction |
+| `MonadLogic.fairBind` | Fair conjunction |
+| `MonadLogic.ifte` | Soft-cut / logical conditional |
+| `MonadLogic.flatMap` | Cross-type bind via repeated splitting |
+
 ## Modules
 
-- **`LogicT.Basic`** — Core `LogicT` type, `Monad`/`Alternative`/`MonadLift` instances, utility functions
-- **`LogicT.Class`** — `MonadLogic` typeclass with generic default implementations
-- **`LogicT.Instances`** — `MonadLogic` instance for `LogicT`, specialized operations
-- **`LogicT.Observation`** — Functions for extracting results from computations
+- **`LogicT.Basic`** — Core `LogicT` type, `Monad`/`Alternative`/`MonadLift` instances, `MStream` type, utility functions
+- **`LogicT.Class`** — `MonadLogic` typeclass with generic derived operations
+- **`LogicT.Operations`** — `LogicM` type alias, concrete `msplit`/`once`/`lnot`/`ifte`/`interleave`/`fairBind`, `MonadLogic` instance for `LogicT`
+- **`LogicT.Observation`** — Functions for extracting results from computations, `Logic` type alias
 
 ## Testing
 
 ```sh
-lake build logict-test && lake exe logict-test
+lake test
 ```
 
 ## License
