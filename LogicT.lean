@@ -12,5 +12,5 @@
 
 import LogicT.Basic
 import LogicT.Class
-import LogicT.Instances
+import LogicT.Operations
 import LogicT.Observation

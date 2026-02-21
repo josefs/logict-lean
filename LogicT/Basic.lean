@@ -5,14 +5,15 @@
   "Backtracking, Interleaving, and Terminating Monad Transformers"
   by Oleg Kiselyov, Chung-chieh Shan, Daniel P. Friedman, Amr Sabry.
 
-  `LogicT m a` is a monad transformer for performing search / backtracking
-  computations layered over another monad `m`. When `m = Id`, `LogicT m`
-  is isomorphic to a lazy list.
+  `LogicT r m a` is a monad transformer for performing search / backtracking
+  computations layered over another monad `m`. The parameter `r` is the
+  result type used in the continuation-passing representation.
 
-  The representation is a lazy stream with three constructors:
-  - `nil`: no results
-  - `cons`: a result followed by more results
-  - `liftM`: a monadic action producing more stream
+  When `m = Id`, `LogicT r Id` is isomorphic to a lazy list.
+
+  The representation uses continuation-passing style (CPS):
+    `LogicT r m a = (a → m r → m r) → m r → m r`
+  This is safe and does not require `unsafe`.
 -/
 
 namespace LogicT
@@ -20,77 +21,85 @@ namespace LogicT
 /-- A monad transformer for performing backtracking computations
     layered over another monad `m`.
 
-    A `LogicT m a` represents a nondeterministic computation that can
+    A `LogicT r m a` represents a nondeterministic computation that can
     produce zero or more results of type `a`, with effects in `m`.
 
-    When `m = Id`, `LogicT m` is isomorphic to a lazy list.
-    For non-trivial `m`, it behaves like a list whose pattern matching
-    causes monadic effects.
+    Uses continuation-passing style (CPS) representation from the paper.
+    The parameter `r` is the result type of the continuation. Observation
+    functions fix `r` to a concrete type (e.g. `List a` for `observeAllT`). -/
+abbrev LogicT (r : Type) (m : Type → Type) (a : Type) : Type :=
+  (a → m r → m r) → m r → m r
 
-    Uses `unsafe inductive` because the type nests recursively through `m`,
-    which Lean's positivity checker cannot verify in general. The API is safe
-    to use; the unsafety is an implementation detail. -/
-unsafe inductive LogicT (m : Type → Type) (a : Type) : Type where
-  /-- No results. -/
-  | nil : LogicT m a
-  /-- A result `head` followed by more results `tail`. -/
-  | cons (head : a) (tail : LogicT m a) : LogicT m a
-  /-- A monadic action that produces more stream. -/
-  | liftM (action : m (LogicT m a)) : LogicT m a
+variable {r : Type} {m : Type → Type} {a b : Type}
 
-variable {m : Type → Type} {a b : Type}
-
-unsafe instance [Pure m] : Inhabited (LogicT m a) := ⟨.nil⟩
+instance : Inhabited (LogicT r m a) := ⟨fun _ nil => nil⟩
 
 /-- Concatenate two `LogicT` computations: produce results from `l₁`, then `l₂`. -/
-unsafe def LogicT.append [Functor m] : LogicT m a → LogicT m a → LogicT m a
-  | .nil, l₂ => l₂
-  | .cons x rest, l₂ => .cons x (LogicT.append rest l₂)
-  | .liftM action, l₂ => .liftM ((· |>.append l₂) <$> action)
+def append (l₁ l₂ : LogicT r m a) : LogicT r m a :=
+  fun cons nil => l₁ cons (l₂ cons nil)
 
 /-- Map a function over all results. -/
-unsafe def LogicT.map' [Functor m] (f : a → b) : LogicT m a → LogicT m b
-  | .nil => .nil
-  | .cons x rest => .cons (f x) (LogicT.map' f rest)
-  | .liftM action => .liftM (LogicT.map' f <$> action)
+def map' (f : a → b) (l : LogicT r m a) : LogicT r m b :=
+  fun cons nil => l (fun a mr => cons (f a) mr) nil
 
 /-- Monadic bind: for each result of `l`, run `f` and collect all results. -/
-unsafe def LogicT.bind' [Monad m] : LogicT m a → (a → LogicT m b) → LogicT m b
-  | .nil, _ => .nil
-  | .cons x rest, f => LogicT.append (f x) (LogicT.bind' rest f)
-  | .liftM action, f => .liftM ((·.bind' f) <$> action)
+def bind' (l : LogicT r m a) (f : a → LogicT r m b) : LogicT r m b :=
+  fun cons nil => l (fun a mr => (f a) cons mr) nil
 
-unsafe instance [Monad m] : Monad (LogicT m) where
-  pure x := .cons x .nil
-  bind := LogicT.bind'
+instance : Monad (LogicT r m) where
+  pure x := fun cons nil => cons x nil
+  bind := bind'
 
-unsafe instance [Monad m] : Alternative (LogicT m) where
-  failure := .nil
-  orElse l₁ l₂ := LogicT.append l₁ (l₂ ())
+instance : Alternative (LogicT r m) where
+  failure := fun _ nil => nil
+  orElse l₁ l₂ := append l₁ (l₂ ())
 
 /-- Lift a monadic computation into `LogicT`, producing a single result. -/
-unsafe def LogicT.lift [Functor m] (ma : m a) : LogicT m a :=
-  .liftM ((fun x => .cons x .nil) <$> ma)
+def lift [Monad m] (ma : m a) : LogicT r m a :=
+  fun cons nil => ma >>= fun x => cons x nil
 
-unsafe instance [Monad m] : MonadLift m (LogicT m) where
-  monadLift := LogicT.lift
+instance [Monad m] : MonadLift m (LogicT r m) where
+  monadLift := lift
 
 /-- Guard: produce a result only if the condition is true. -/
 @[inline]
-unsafe def LogicT.guard [Monad m] (p : Bool) : LogicT m Unit :=
-  if p then Pure.pure () else .nil
+def guard (p : Bool) : LogicT r m Unit :=
+  if p then Pure.pure () else failure
 
 /-- Create a `LogicT` computation from a list of values. -/
-unsafe def LogicT.fromList [Monad m] : List a → LogicT m a
-  | [] => .nil
-  | x :: xs => .cons x (LogicT.fromList xs)
+def fromList : List a → LogicT r m a
+  | [] => failure
+  | x :: xs => Pure.pure x <|> fromList xs
 
 /-- Create a `LogicT` computation from an array of values. -/
-unsafe def LogicT.fromArray [Monad m] (xs : Array a) : LogicT m a :=
-  LogicT.fromList xs.toList
+def fromArray (xs : Array a) : LogicT r m a :=
+  fromList xs.toList
 
 /-- Choose nondeterministically from a list. -/
-unsafe def LogicT.choose [Monad m] (xs : List a) : LogicT m a :=
-  LogicT.fromList xs
+def choose (xs : List a) : LogicT r m a :=
+  fromList xs
+
+/-- The stream type for lazy `msplit` results.
+
+    An `MStream m a` is either empty or a head value `a` paired with a
+    monadic action that produces the next `MStream` element when forced.
+    This allows `msplit` to be lazy: it only computes up to the first
+    result, deferring the rest.
+
+    Uses `unsafe` because `m (MStream m a)` is a non-positive occurrence—
+    Lean's kernel rejects it, but it is safe in practice since `m` is always
+    covariant. -/
+unsafe inductive MStream (m : Type → Type) (a : Type) where
+  | nil : MStream m a
+  | cons : a → m (MStream m a) → MStream m a
+
+/-- Convert an `MStream` back to a `LogicT` computation.
+    Each element is re-injected via `pure`/`<|>`, and the tail is
+    forced lazily when the continuation asks for more results. -/
+unsafe def MStream.toLogicT [Monad m] : MStream m a → LogicT r m a
+  | .nil => failure
+  | .cons x rest => (Pure.pure x : LogicT r m a) <|> fun sk fk => do
+      let next ← rest
+      (MStream.toLogicT next : LogicT r m a) sk fk
 
 end LogicT
